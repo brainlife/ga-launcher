@@ -57,7 +57,7 @@ c.NotebookApp.tornado_settings = {
         #'Access-Control-Allow-Origin': "*",
         #'Access-Control-Allow-Credentials': "true",
         #'Access-Control-Allow-Methods': "OPTIONS",
-        'Content-Security-Policy': "frame-ancestors 'self' http://localhost:8080 https://dev1.soichi.us https://brainlife.io https://test.brainlife.io"
+        'Content-Security-Policy': "frame-ancestors 'self' http://localhost:8080 https://dev1.soichi.us https://brainlife.io https://test.brainlife.io https://lite.brainlife.io"
   }
 }
 

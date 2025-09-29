@@ -34,7 +34,7 @@ esac
 echo "finding open port"
 port=$(./find_open_port.py)
 
-base_url=${URL_PREFIX:-"/ipython/$port/"}
+base_url=${"/$URL_PREFIX/$port/":-"/ipython/$port/"}
 
 token=$(openssl rand -hex 32)
 
@@ -108,7 +108,8 @@ fi
 cat <<EOF > container.json
 {
     "port": $port,
-    "token": "$token"
+    "token": "$token",
+    "prefix": "$URL_PREFIX",
 }
 EOF
 

@@ -6,8 +6,6 @@ set -e
 
 #I need to point to the right api server based on the environment we are in
 host=brainlife.io
-[ $HOSTNAME == "dev1.soichi.us" ] && host=dev1.soichi.us
-[ $HOSTNAME == "ga-test" ] && host=test.brainlife.io
 
 group_id=$(jq -r .group config.json)
 container=$(jq -r .container config.json)
@@ -36,13 +34,15 @@ esac
 echo "finding open port"
 port=$(./find_open_port.py)
 
+base_url=${URL_PREFIX:-"/ipython/$port/"}
+
 token=$(openssl rand -hex 32)
 
 cat <<EOF > jupyter_notebook_config.py
 from jupyter_core.paths import jupyter_data_dir
 
 c = get_config()
-c.NotebookApp.base_url = '/ipython/$port/'
+c.NotebookApp.base_url = '$base_url'
 c.NotebookApp.ip = '0.0.0.0'
 c.NotebookApp.port = 8080
 c.NotebookApp.open_browser = False

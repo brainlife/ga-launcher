@@ -2,7 +2,7 @@
 
 rm -f pull.log
 
-set -e
+set -ex
 
 #I need to point to the right api server based on the environment we are in
 host=brainlife.io
@@ -104,6 +104,77 @@ if [ -d /mnt/secondary/$group_id ]; then
     input_mount="-v /mnt/secondary/$group_id:/input:ro,shared -v /mnt/secondary/$group_id:/notebook/input:ro,shared"
 fi
 
+#pull s3fs mount metadata from amaretti /task/:id/bootstrap and mount on host, then
+#bind-mount into the container (same pattern as input_mount above; the jupyter container
+#is unprivileged so it can't run s3fs itself). Mirrors mount_task_s3() in docker/runner/bootstrap.sh.
+#s3 mounts are best-effort - a failure here must not stop the notebook from launching
+s3_mount=""
+if [ -n "$BRAINLIFE_API_URL" ] && [ -n "$BRAINLIFE_API_JWT" ] && [ -n "$TASK_ID" ]; then
+    set +e
+    export AWS_REGION="${AWS_REGION:-us-east-2}"
+    mounts=$(curl -fsS -H "Authorization: Bearer $BRAINLIFE_API_JWT" "$BRAINLIFE_API_URL/task/$TASK_ID/bootstrap")
+    if [ $? -ne 0 ]; then
+        echo "failed to fetch bootstrap metadata - continuing without s3 mounts"
+        mounts='{"mounts":[]}'
+    fi
+    while read -r m; do
+        type=$(echo "$m" | jq -r '.type // "s3"')
+        mountpoint=$(echo "$m" | jq -r .mountpoint)
+        readonly=$(echo "$m" | jq -r .readonly)
+        mkdir -p "$mountpoint"
+
+        if [ "$type" = "dandi" ]; then
+            #dandifs.py maps the DANDI API onto a folder tree; no AWS creds needed
+            dandiset=$(echo "$m" | jq -r .dandiset)
+            version=$(echo "$m" | jq -r '.version // "draft"')
+            if ! mountpoint -q "$mountpoint"; then
+                DANDIFS_ALLOW_OTHER=1 nohup python3 "$(pwd)/dandifs.py" "$mountpoint" "$dandiset" "$version" > "dandi.$dandiset.log" 2>&1 &
+                for i in $(seq 1 10); do mountpoint -q "$mountpoint" && break; sleep 0.5; done
+            fi
+        else
+            bucket=$(echo "$m" | jq -r .bucket)
+            prefix=$(echo "$m" | jq -r .prefix)
+            opts="-o allow_other -o use_path_request_style -o url=https://s3.$AWS_REGION.amazonaws.com -o endpoint=$AWS_REGION -o public_bucket=1"
+            [ "$readonly" = "true" ] && opts="$opts -o ro"
+            mountpoint -q "$mountpoint" || s3fs "$bucket:/$prefix" "$mountpoint" $opts
+        fi
+
+        if ! mountpoint -q "$mountpoint"; then
+            echo "failed to mount $mountpoint ($type) - skipping"
+            continue
+        fi
+
+        bind="rw"; [ "$readonly" = "true" ] && bind="ro"
+        s3_mount="$s3_mount -v $mountpoint:$mountpoint:$bind,shared"
+    done < <(echo "$mounts" | jq -c '.mounts[]')
+    set -e
+fi
+
+#mount DANDI datasets as a folder tree on the host, then bind-mount into the container -
+#same pattern as s3_mount above (the unprivileged container can't run FUSE itself).
+#dandifs.py talks to the DANDI API and streams file bytes from public S3 blobs.
+#set "dandiset" in config.json to a dandiset id (e.g. "000003") or "all" for the whole archive.
+#best-effort - a failure here must not stop the notebook from launching
+dandi_mount=""
+dandiset=$(jq -r '.dandiset // empty' config.json)
+if [ -n "$dandiset" ]; then
+    set +e
+    dandi_mp="/mnt/dandi/$TASK_ID"
+    mkdir -p "$dandi_mp"
+    dandi_args="$dandi_mp"
+    [ "$dandiset" != "all" ] && dandi_args="$dandi_args $dandiset"
+    if ! mountpoint -q "$dandi_mp"; then
+        DANDIFS_ALLOW_OTHER=1 nohup python3 "$(pwd)/dandifs.py" $dandi_args > dandi.log 2>&1 &
+        for i in $(seq 1 10); do mountpoint -q "$dandi_mp" && break; sleep 0.5; done
+    fi
+    if mountpoint -q "$dandi_mp"; then
+        dandi_mount="-v $dandi_mp:/notebook/dandi:ro,shared"
+    else
+        echo "failed to mount DANDI - skipping"
+    fi
+    set -e
+fi
+
 #for ui
 cat <<EOF > container.json
 {
@@ -126,6 +197,8 @@ nohup docker run \
     -v `pwd`/jupyter_notebook_config.py:/etc/jupyter/jupyter_notebook_config.py \
     -e PROJECT_ID=$project_id \
     $input_mount \
+    $s3_mount \
+    $dandi_mount \
     -p $port:8080 \
     --memory=16g \
     --cpus=4 \
